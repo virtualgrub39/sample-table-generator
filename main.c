@@ -12,6 +12,8 @@
 #include <lua.h>
 #include <lualib.h>
 
+#include "ketopt.h"
+
 static lua_State* L = NULL;
 static int ref_f = LUA_REFNIL;
 
@@ -107,6 +109,8 @@ generate_samples(sample_table_t* table,
         runtime_assert(x >= 0 && x <= 1);
 
         double y = waveform(x);
+        if (y < 0)
+            return false; // lua failure
         runtime_assert(y >= 0 && y <= 1);
 
         uint32_t sample_value = y * max_value;
@@ -292,111 +296,102 @@ usage(const char* progname)
     printf("\t-f [path]\t- specify lua function path\n");
 }
 
+enum {
+    ko_help = 256,
+    ko_packed,
+    ko_name,
+    ko_length,
+    ko_bits,
+    ko_file,
+};
+
+static const ko_longopt_t longopts[] = {
+    { "help", ko_no_argument, ko_help },
+    { "packed", ko_no_argument, ko_packed },
+    { "name", ko_required_argument, ko_name },
+    { "length", ko_required_argument, ko_length },
+    { "bits", ko_required_argument, ko_bits },
+    { "lua", ko_required_argument, ko_file },
+    { NULL, 0, 0 }
+};
+
 int
 main(int argc, char* argv[])
 {
-    // TODO: some helper for paring arguments?
-
     bool packed = false;
     char* table_name = "function";
     uint32_t table_length = 256;
     uint32_t sample_width = 8;
-    char* lua_file_path = "./example.lua";
+    char* lua_file = "./example.lua";
 
-    for (int32_t i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "help") == 0) {
-            usage(argv[0]);
-            return 0;
-        }
+    ketopt_t s = KETOPT_INIT;
+    int c;
+    const char* ostr = "hpn:l:b:f:";
 
-        if (argv[i][0] == '-') {
-            switch (argv[i][1]) {
-                case 'h':
-                    usage(argv[0]);
-                    return 0;
-                case 'p':
-                    packed = true;
-                    break;
-                case 'n':
-                    if (i == argc - 1) {
-                        fprintf(stderr, "Expected table name, got nothing.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                    else if (argv[i + 1][0] == '-') {
-                        fprintf(stderr, "Expected table name, got flag.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                    table_name = argv[++i];
-                    break;
-                case 'l': {
-                    if (i == argc - 1) {
-                        fprintf(stderr,
-                                "Expected table length, got nothing.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                    else if (argv[i + 1][0] == '-') {
-                        fprintf(stderr, "Expected table length, got flag.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
+    while ((c = ketopt(&s, argc, argv, true, ostr, longopts)) != -1) {
+        switch (c) {
+            case 'h':
+            case ko_help:
+                usage(argv[0]);
+                return 0;
 
-                    char* endptr = NULL;
-                    table_length = strtoul(argv[++i], &endptr, 10);
-                    if (*endptr != 0 || errno == EINVAL || errno == ERANGE) {
-                        fprintf(stderr,
-                                "Invalid value provided for table length.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                } break;
-                case 'b': {
-                    if (i == argc - 1) {
-                        fprintf(stderr,
-                                "Expected sample width, got nothing.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                    else if (argv[i + 1][0] == '-') {
-                        fprintf(stderr, "Expected sample width, got flag.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
+            case 'p':
+            case ko_packed:
+                packed = true;
+                break;
 
-                    char* endptr = NULL;
-                    sample_width = strtoul(argv[++i], &endptr, 10);
-                    if (*endptr != 0 || errno == EINVAL || errno == ERANGE ||
-                        sample_width > 32) {
-                        fprintf(stderr,
-                                "Invalid value provided for sample width.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                } break;
-                case 'f':
-                    if (i == argc - 1) {
-                        fprintf(stderr,
-                                "Expected lua file path, got nothing.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                    else if (argv[i + 1][0] == '-') {
-                        fprintf(stderr, "Expected lua file path, got flag.\n");
-                        usage(argv[0]);
-                        return 1;
-                    }
-                    lua_file_path = argv[++i];
-                    break;
-                default:
-                    fprintf(stderr, "Invalid flag: %s\n", argv[i]);
+            case 'n':
+            case ko_name:
+                table_name = s.arg;
+                break;
+
+            case 'l':
+            case ko_length: {
+                errno = 0;
+                char* end;
+                unsigned long v = strtoul(s.arg, &end, 10);
+                if (errno || *end != '\0') {
+                    fprintf(stderr, "Invalid table length: %s\n", s.arg);
                     usage(argv[0]);
                     return 1;
+                }
+                table_length = (uint32_t)v;
+                break;
             }
-            continue;
-        }
 
+            case 'b':
+            case ko_bits: {
+                errno = 0;
+                char* end;
+                unsigned long v = strtoul(s.arg, &end, 10);
+                if (errno || *end != '\0' || v > 32) {
+                    fprintf(stderr, "Invalid sample width: %s\n", s.arg);
+                    usage(argv[0]);
+                    return 1;
+                }
+                sample_width = (uint32_t)v;
+                break;
+            }
+
+            case 'f':
+            case ko_file:
+                lua_file = s.arg;
+                break;
+
+            case '?':
+                fprintf(stderr, "Unknown option: %s\n", argv[s.ind]);
+                usage(argv[0]);
+                return 1;
+
+            case ':':
+                fprintf(
+                  stderr, "Option requires an argument: %s\n", argv[s.ind]);
+                usage(argv[0]);
+                return 1;
+        }
+    }
+
+    for (int i = s.ind; i < argc; i++) {
         fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
         usage(argv[0]);
         return 1;
@@ -410,7 +405,7 @@ main(int argc, char* argv[])
 
     luaL_openlibs(L);
 
-    if (luaL_loadfile(L, lua_file_path) || lua_pcall(L, 0, 0, 0)) {
+    if (luaL_loadfile(L, lua_file) || lua_pcall(L, 0, 0, 0)) {
         fprintf(stderr, "Error loading script: %s\n", lua_tostring(L, -1));
         lua_close(L);
         return 1;
@@ -431,6 +426,7 @@ main(int argc, char* argv[])
         return 1;
     }
 
+    // TODO: more formats?
     output_c_header(table_name, &samples, packed);
 
     if (L && ref_f != LUA_REFNIL) {

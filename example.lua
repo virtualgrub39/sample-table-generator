@@ -1,3 +1,3 @@
 function f(x)
-	return -x + 1.0
+	return (math.sin(2*math.pi*x) + 1) / 2
 end
