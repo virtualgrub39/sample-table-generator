@@ -8,6 +8,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
+
+static lua_State* L = NULL;
+static int ref_f = LUA_REFNIL;
+
 #define runtime_assert(condition)                                              \
     if (!(condition)) {                                                        \
         fprintf(stderr,                                                        \
@@ -250,27 +257,51 @@ output_c_header(const char* table_name,
 double
 f(double x)
 {
-    return x; // f(x) = x
+    double y = 0.0;
+
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref_f);
+    lua_pushnumber(L, x);
+
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        fprintf(stderr, "Lua error in f(): %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return -1.0;
+    }
+
+    if (!lua_isnumber(L, -1)) {
+        fprintf(stderr, "Lua f() didn’t return a number\n");
+        lua_pop(L, 1);
+        return -1.0;
+    }
+
+    y = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return y;
 }
 
 void
 usage(const char* progname)
 {
-    (void)progname;
+    printf("%s - sample table generator\n", progname);
+    printf("ARGUMENTS:\n");
+    printf("\t-h | --help\t- display this message\n");
+    printf("\t-p\t\t- turn on table packing\n");
+    printf("\t-n [name]\t- specify table name\n");
+    printf("\t-l [len]\t- specify table length\n");
+    printf("\t-b [n]\t\t- specify sample width (in bits)\n");
+    printf("\t-f [path]\t- specify lua function path\n");
 }
 
 int
 main(int argc, char* argv[])
 {
-    // TODO: accept some kind of lua file, that has to implemet some function
-    // f(x)?
-
     // TODO: some helper for paring arguments?
 
     bool packed = false;
     char* table_name = "function";
     uint32_t table_length = 256;
     uint32_t sample_width = 8;
+    char* lua_file_path = "./example.lua";
 
     for (int32_t i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "help") == 0) {
@@ -344,6 +375,24 @@ main(int argc, char* argv[])
                         return 1;
                     }
                 } break;
+                case 'f':
+                    if (i == argc - 1) {
+                        fprintf(stderr,
+                                "Expected lua file path, got nothing.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                    else if (argv[i + 1][0] == '-') {
+                        fprintf(stderr, "Expected lua file path, got flag.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                    lua_file_path = argv[++i];
+                    break;
+                default:
+                    fprintf(stderr, "Invalid flag: %s\n", argv[i]);
+                    usage(argv[0]);
+                    return 1;
             }
             continue;
         }
@@ -353,11 +402,45 @@ main(int argc, char* argv[])
         return 1;
     }
 
-    sample_table_t samples = { 0 };
-    if (!generate_samples(&samples, f, table_length, sample_width))
+    L = luaL_newstate();
+    if (!L) {
+        fprintf(stderr, "Failed to create lua context.\n");
         return 1;
+    }
+
+    luaL_openlibs(L);
+
+    if (luaL_loadfile(L, lua_file_path) || lua_pcall(L, 0, 0, 0)) {
+        fprintf(stderr, "Error loading script: %s\n", lua_tostring(L, -1));
+        lua_close(L);
+        return 1;
+    }
+
+    lua_getglobal(L, "f");
+
+    if (!lua_isfunction(L, -1)) {
+        fprintf(stderr, "Script must define function f(x)\n");
+        return 1;
+    }
+
+    ref_f = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    sample_table_t samples = { 0 };
+    if (!generate_samples(&samples, f, table_length, sample_width)) {
+        lua_close(L);
+        return 1;
+    }
 
     output_c_header(table_name, &samples, packed);
+
+    if (L && ref_f != LUA_REFNIL) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref_f);
+        ref_f = LUA_REFNIL;
+    }
+    if (L) {
+        lua_close(L);
+        L = NULL;
+    }
 
     return 0;
 }
