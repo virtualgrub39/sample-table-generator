@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -252,20 +253,111 @@ f(double x)
     return x; // f(x) = x
 }
 
+void
+usage(const char* progname)
+{
+    (void)progname;
+}
+
 int
-main(void)
+main(int argc, char* argv[])
 {
     // TODO: accept some kind of lua file, that has to implemet some function
     // f(x)?
-    // FIXME: for now, we'll just implemnt the function in C - only the sample
-    // generation matters
-    // TODO: also accept table length, bit width values and packed flag
+
+    // TODO: some helper for paring arguments?
+
+    bool packed = false;
+    char* table_name = "function";
+    uint32_t table_length = 256;
+    uint32_t sample_width = 8;
+
+    for (int32_t i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "help") == 0) {
+            usage(argv[0]);
+            return 0;
+        }
+
+        if (argv[i][0] == '-') {
+            switch (argv[i][1]) {
+                case 'h':
+                    usage(argv[0]);
+                    return 0;
+                case 'p':
+                    packed = true;
+                    break;
+                case 'n':
+                    if (i == argc - 1) {
+                        fprintf(stderr, "Expected table name, got nothing.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                    else if (argv[i + 1][0] == '-') {
+                        fprintf(stderr, "Expected table name, got flag.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                    table_name = argv[++i];
+                    break;
+                case 'l': {
+                    if (i == argc - 1) {
+                        fprintf(stderr,
+                                "Expected table length, got nothing.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                    else if (argv[i + 1][0] == '-') {
+                        fprintf(stderr, "Expected table length, got flag.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+
+                    char* endptr = NULL;
+                    table_length = strtoul(argv[++i], &endptr, 10);
+                    if (*endptr != 0 || errno == EINVAL || errno == ERANGE) {
+                        fprintf(stderr,
+                                "Invalid value provided for table length.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                } break;
+                case 'b': {
+                    if (i == argc - 1) {
+                        fprintf(stderr,
+                                "Expected sample width, got nothing.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                    else if (argv[i + 1][0] == '-') {
+                        fprintf(stderr, "Expected sample width, got flag.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+
+                    char* endptr = NULL;
+                    sample_width = strtoul(argv[++i], &endptr, 10);
+                    if (*endptr != 0 || errno == EINVAL || errno == ERANGE ||
+                        sample_width > 32) {
+                        fprintf(stderr,
+                                "Invalid value provided for sample width.\n");
+                        usage(argv[0]);
+                        return 1;
+                    }
+                } break;
+            }
+            continue;
+        }
+
+        fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
+        usage(argv[0]);
+        return 1;
+    }
 
     sample_table_t samples = { 0 };
-    if (!generate_samples(&samples, f, 64, 7))
+    if (!generate_samples(&samples, f, table_length, sample_width))
         return 1;
 
-    output_c_header("linear", &samples, true);
+    output_c_header(table_name, &samples, packed);
 
     return 0;
 }
