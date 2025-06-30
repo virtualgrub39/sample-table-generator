@@ -283,19 +283,20 @@ f(double x)
     return y;
 }
 
-void
-usage(const char* progname)
+static void
+usage(const char* prog)
 {
-    printf("%s - sample table generator\n", progname);
-    printf("ARGUMENTS:\n");
-    printf("\t-h | --help\t- display this message\n");
-    printf("\t-p\t\t- turn on table packing\n");
-    printf("\t-n [name]\t- specify table name\n");
-    printf("\t-l [len]\t- specify table length\n");
-    printf("\t-b [n]\t\t- specify sample width (in bits)\n");
-    printf("\t-f [path]\t- specify lua function path\n");
+    fprintf(
+      stderr,
+      "Usage: %s [OPTIONS]\n"
+      "  -h, --help           Show this help\n"
+      "  -p, --packed         Enable packed mode\n"
+      "  -n, --name NAME      Set table name (default: \"function\")\n"
+      "  -l, --length N       Set table length (default: 256)\n"
+      "  -b, --bits N         Set sample width in bits (default: 8)\n"
+      "  -f, --lua FILE       Path to lua file (default: ./example.lua)\n",
+      prog);
 }
-
 enum {
     ko_help = 256,
     ko_packed,
