@@ -1,5 +1,7 @@
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -14,6 +16,13 @@
 
 #include "ketopt.h"
 
+#define IMAGE_WIDTH 640
+#define IMAGE_HEIGTH 480
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#define OLIVEC_IMPLEMENTATION
+#include "olive.c"
+
 static lua_State* L = NULL;
 static int ref_f = LUA_REFNIL;
 
@@ -27,44 +36,12 @@ static int ref_f = LUA_REFNIL;
     }
 
 typedef struct {
-    void* samples;
+    // void* samples;
+    long double* samples;
     size_t length;
     uint8_t sample_width;
     uint8_t storage_width;
 } sample_table_t;
-
-uint32_t
-sample_table_get(const sample_table_t* table, size_t index)
-{
-    switch (table->storage_width) {
-        case 8:
-            return ((uint8_t*)table->samples)[index];
-        case 16:
-            return ((uint16_t*)table->samples)[index];
-        case 32:
-            return ((uint32_t*)table->samples)[index];
-        default:
-            runtime_assert(false && "UNREACHABLE");
-    }
-}
-
-void
-sample_table_set(sample_table_t* table, size_t index, uint32_t value)
-{
-    switch (table->storage_width) {
-        case 8:
-            ((uint8_t*)table->samples)[index] = value;
-            break;
-        case 16:
-            ((uint16_t*)table->samples)[index] = value;
-            break;
-        case 32:
-            ((uint32_t*)table->samples)[index] = value;
-            break;
-        default:
-            runtime_assert(false && "UNREACHABLE");
-    }
-}
 
 bool
 generate_samples(sample_table_t* table,
@@ -87,17 +64,11 @@ generate_samples(sample_table_t* table,
         return false;
     }
 
-    void* samples = malloc((storage_width / 8) * len);
+    long double* samples = malloc(len * sizeof(long double));
     if (!samples) {
         perror("malloc()");
         return false;
     }
-
-    uint32_t max_value;
-    if (sample_width == 32)
-        max_value = UINT32_MAX;
-    else
-        max_value = (1U << sample_width) - 1;
 
     table->samples = samples;
     table->length = len;
@@ -113,11 +84,9 @@ generate_samples(sample_table_t* table,
             return false; // lua failure
         runtime_assert(y >= 0 && y <= 1);
 
-        uint32_t sample_value = y * max_value;
-
         // printf("x: %f, y: %f, sample: %u\n", x, y, sample_value);
 
-        sample_table_set(table, i, sample_value);
+        samples[i] = y;
     }
 
     return true;
@@ -154,6 +123,12 @@ output_c_header(const char* table_name,
     printf("#define %s_SAMPLE_COUNT %lu\n", upper_name, table->length);
     printf("#define %s_SAMPLE_WIDTH %u\n\n", upper_name, table->sample_width);
 
+    uint32_t max_value;
+    if (table->sample_width == 32)
+        max_value = UINT32_MAX;
+    else
+        max_value = (1U << table->sample_width) - 1;
+
     if (packed) {
         const size_t table_size_packed =
           packed_size(table->length, table->sample_width);
@@ -173,7 +148,7 @@ output_c_header(const char* table_name,
                           : ((1u << table->sample_width) - 1u);
 
         for (size_t i = 0; i < table->length; ++i) {
-            uint32_t v = sample_table_get(table, i) & mask;
+            uint32_t v = (uint32_t)(table->samples[i] * max_value) & mask;
             acc = (acc << table->sample_width) | v;
             acc_bits += table->sample_width;
 
@@ -217,7 +192,7 @@ output_c_header(const char* table_name,
           " %s_sample_table[%s_SAMPLE_COUNT] = {\n\t", table_name, upper_name);
 
         for (size_t i = 0; i < table->length; ++i) {
-            printf("%u, ", sample_table_get(table, i));
+            printf("%u, ", (uint32_t)(table->samples[i] * max_value));
             if ((i + 1) % 12 == 0)
                 printf("\n\t");
         }
@@ -256,6 +231,110 @@ output_c_header(const char* table_name,
     }
 
     printf("#endif // _%s_H\n", upper_name);
+}
+
+void
+output_image(const char* table_name, const sample_table_t* table)
+{
+    uint32_t pixels[IMAGE_WIDTH * IMAGE_HEIGTH];
+
+    Olivec_Canvas oc =
+      olivec_canvas(pixels, IMAGE_WIDTH, IMAGE_HEIGTH, IMAGE_WIDTH);
+
+    olivec_fill(oc, 0x00ffffff);
+
+    struct {
+        uint32_t x, y, w, h;
+    } coord_rect;
+
+    uint32_t min_dim = (uint32_t)fminl(IMAGE_WIDTH, IMAGE_HEIGTH);
+
+    coord_rect.w = min_dim * 0.8;
+    coord_rect.h = min_dim * 0.8;
+    coord_rect.x = ((IMAGE_WIDTH / 2) - (coord_rect.w / 2));
+    coord_rect.y = ((IMAGE_HEIGTH / 2) - (coord_rect.h / 2));
+
+#define WHITE 0xFFFFFFFFu
+#define BLACK 0xFF000000u
+#define RED 0xFF0000FFu
+
+    olivec_fill(oc, WHITE);
+
+#define COORD_X(u) ((uint32_t)(coord_rect.x + ((u) * (float)coord_rect.w)))
+#define COORD_Y(u)                                                             \
+    ((uint32_t)(coord_rect.y + ((1.0f - (u)) * (float)coord_rect.h)))
+
+#define ARROW(x1, y1, x2, y2, color)                                           \
+    do {                                                                       \
+        int _ax = COORD_X(x1), _ay = COORD_Y(y1);                              \
+        int _bx = COORD_X(x2), _by = COORD_Y(y2);                              \
+        olivec_line(oc, _ax, _ay, _bx, _by, color);                            \
+                                                                               \
+        const int _HL = 12, _HW = 6;                                           \
+        int _dx = _bx - _ax, _dy = _by - _ay;                                  \
+                                                                               \
+        int _dir_horiz = (abs(_dx) >= abs(_dy));                               \
+        int _p1x, _p1y, _p2x, _p2y;                                            \
+                                                                               \
+        if (_dir_horiz) {                                                      \
+            /* horizontal arrow */                                             \
+            if (_dx > 0) { /* → */                                             \
+                _p1x = _bx - _HL;                                              \
+                _p1y = _by - _HW;                                              \
+                _p2x = _bx - _HL;                                              \
+                _p2y = _by + _HW;                                              \
+            }                                                                  \
+            else { /* ← */                                                     \
+                _p1x = _bx + _HL;                                              \
+                _p1y = _by + _HW;                                              \
+                _p2x = _bx + _HL;                                              \
+                _p2y = _by - _HW;                                              \
+            }                                                                  \
+        }                                                                      \
+        else {                                                                 \
+            /* vertical arrow */                                               \
+            if (_dy > 0) { /* ↓ */                                             \
+                _p1x = _bx + _HW;                                              \
+                _p1y = _by - _HL;                                              \
+                _p2x = _bx - _HW;                                              \
+                _p2y = _by - _HL;                                              \
+            }                                                                  \
+            else { /* ↑ */                                                     \
+                _p1x = _bx - _HW;                                              \
+                _p1y = _by + _HL;                                              \
+                _p2x = _bx + _HW;                                              \
+                _p2y = _by + _HL;                                              \
+            }                                                                  \
+        }                                                                      \
+                                                                               \
+        olivec_triangle(oc, _bx, _by, _p1x, _p1y, _p2x, _p2y, color);          \
+    } while (0)
+
+    ARROW(-0.01, -0.01, 1.06, -0.01, BLACK);
+    ARROW(-0.01, -0.01, -0.01, 1.06, BLACK);
+
+    for (uint32_t i = 0; i < table->length; ++i) {
+        // olivec_rect(oc,
+        //     COORD_X((long double)i / table->length),
+        //     COORD_Y(table->samples[i]),
+        //     2,
+        //     table->samples[i] * coord_rect.h,
+        //     RED
+        // );
+        olivec_circle(oc,
+                      COORD_X((long double)i / table->length),
+                      COORD_Y(table->samples[i]),
+                      2,
+                      RED);
+    }
+
+    char path[PATH_MAX] = { 0 };
+    strcat(path, table_name);
+    strcat(path, ".bmp");
+
+    if (!stbi_write_bmp(path, IMAGE_WIDTH, IMAGE_HEIGTH, 4, pixels)) {
+        fprintf(stderr, "Couldn't save %s\n", path);
+    }
 }
 
 double
@@ -429,6 +508,7 @@ main(int argc, char* argv[])
 
     // TODO: more formats?
     output_c_header(table_name, &samples, packed);
+    output_image(table_name, &samples);
 
     if (L && ref_f != LUA_REFNIL) {
         luaL_unref(L, LUA_REGISTRYINDEX, ref_f);

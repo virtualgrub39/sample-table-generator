@@ -1,3 +1,5 @@
 *.o
 sample-table-generator
 test.h
+.vscode
+*.bmp
